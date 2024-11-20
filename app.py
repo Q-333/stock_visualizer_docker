@@ -1,137 +1,97 @@
-import sqlite3
-from flask import Flask, render_template, request, url_for, flash, redirect, abort
+
+import csv
+from flask import Flask, render_template, request
+import requests
+import pygal
+from datetime import datetime
 
 # make a Flask application object called app
 app = Flask(__name__)
 app.config["DEBUG"] = True
 app.config['SECRET_KEY'] = 'your secret key'
 
+api_key = 'L3N6WZF86JZURK2W' 
 
-# Function to open a connection to the database.db file
-def get_db_connection():
-    # create connection to the database
-    conn = sqlite3.connect('database.db')
-    
-    # allows us to have name-based access to columns
-    # the database connection will return rows we can access like regular Python dictionaries
-    conn.row_factory = sqlite3.Row
+# read csv file
+def load_symbols():
+    symbols = []
+    csv_file = "stocks.csv"
+    try:
+        with open(csv_file, newline='', encoding='utf-8') as file:
+            csv_reader = csv.reader(file)
+            next(csv_reader)
+            for row in csv_reader:
+                symbol = row[0]
+                company = row[1]
+                sector = row[2]
+                symbols.append(symbol)
 
-    #return the connection object
-    return conn
+    except Exception as e:
+        print(f"Error reading stocks.csv: {e}")
+    return symbols
 
-# Function to retrieve a post from the database
-def get_post(post_id):
-    conn = get_db_connection()
-    post = conn.execute('SELECT * FROM posts WHERE id = ?', (post_id,)).fetchone()
-    conn.close()
+# route for the stock visualizer page
+@app.route('/', methods=('GET', 'POST'))
+def stock_visualizer():
+    #load the csv file
+    symbols = load_symbols()
 
-    if post is None:
-        abort(404)
-
-    return post
-
-
-# use the app.route() decorator to create a Flask view function called index()
-@app.route('/')
-def index():
-    # get a connection to the database
-    conn=get_db_connection()
-
-    # execute a query to read all posts from the posts table in database
-    posts=conn.execute('SELECT * FROM posts').fetchall()
-
-    # close connection
-    conn.close()
-
-    # send the posts to the index.html template to be displayed
-    return render_template('index.html', posts=posts)
-    
-    return "<h1>Welcome to Quanah's Blog</h1>"
-
-
-# route to create a post
-@app.route('/create/', methods=('GET', 'POST'))
-def create():
-    # determine if the page is being requested with a POST or GET request
     if request.method == 'POST':
-        # get the title and content that was submitted
-        title = request.form['title']
-        content = request.form['content']
+        symbol = request.form['symbol']
+        chart_type = int(request.form['chart_type'])
+        time_series = request.form['time_series']
+        start_date = datetime.strptime(request.form['start_date'], "%Y-%m-%d")
+        end_date = datetime.strptime(request.form['end_date'], "%Y-%m-%d")
 
-        # display an error if title or content is not submitted
+        # request parameters for API
+        params = {
+            'function': time_series,
+            'symbol': symbol,
+            'apikey': api_key,
+            'outputsize': 'full'
+        }
+        url = 'https://www.alphavantage.co/query'
+        response = requests.get(url, params=params)
+        data = response.json()
 
-        # else make a database connection and insert the blog post content
-        if not title:
-            flash('Title is required')
-        elif not content:
-            flash('Content is required')
-        else:
-            conn = get_db_connection()
-            # insert data into database
-            conn.execute('INSERT INTO posts (title, content) VALUES (?, ?)', (title, content))
-            conn.commit()
-            conn.close()
-            return redirect(url_for('index'))
+        # call filter data function and create chart function
+        filtered_data = filter_data_by_date(data, start_date, end_date)
+        chart_svg = create_chart(filtered_data, chart_type, symbol)
 
-
-    return render_template('create.html')
-
-# create a route to edit a post. Load the page with the get or post method.
-# pass the post id as a url parameter
-@app.route('/<int:id>/edit/', methods=('GET', 'POST'))
-def edit(id):
-    # get a post from the database with a select query for the post with that id
-    post = get_post(id)
-
-    # determine if the page is requested with POST or GET request
-    #If POST, proces the form data. Get the data and validate it. Update the post and redirect to the hompage.
-    if request.method == 'POST':
-        # get the title and content that was submitted
-        title = request.form['title']
-        content = request.form['content']
-
-        #If not title or content, flash an error message
-        if not title:
-            flash('Title is required')
-        elif not content:
-            flash('Content is requried')
-        else:
-            conn = get_db_connection()
-
-            conn.execute('UPDATE posts SET title = ?, content = ? Where id =?', (title, content, id))
-            conn.commit()
-            conn.close()
-
-            #redirect to the homepage
-            return redirect(url_for('index'))
+        # Return chart
+        return render_template('stock_visualizer.html', chart_svg=chart_svg, symbols=symbols)
     
-    
-    #If GET then display page
-    return render_template('edit.html', post=post)
+    return render_template('stock_visualizer.html', chart_svg=None, symbols=symbols)
 
-# create a route to delete a post
-#delete page will only be processed with a POSt method
-#the post id is the url parameter
+# filter data by the date
+def filter_data_by_date(data, start_date, end_date):
+    time_series_data = next((data[key] for key in data.keys() if 'Time Series' in key), None)
+    if time_series_data is None:
+        return {}
 
-@app.route('/<int:id>/delete/', methods=('POST',))
-def delete(id):
-    # get the post
-    post = get_post(id)
+    filtered_data = {
+        date_str: daily_data
+        for date_str, daily_data in time_series_data.items()
+        if start_date <= datetime.strptime(date_str, "%Y-%m-%d") <= end_date
+    }
+    return filtered_data
 
-    #Connect to the database
-    conn = get_db_connection()
+#render svg chart in a web usable format
+def create_chart(data, chart_type, symbol):
+    dates = sorted(data.keys())
+    open_prices = [float(data[date]['1. open']) for date in dates]
+    high_prices = [float(data[date]['2. high']) for date in dates]
+    low_prices = [float(data[date]['3. low']) for date in dates]
+    close_prices = [float(data[date]['4. close']) for date in dates]
 
-    #execute a delete query
-    conn.execute('DELETE from posts WHERE id = ?', (id,))
+    chart = pygal.Bar(title=f'{symbol} Stock Prices', x_label_rotation=20) if chart_type == 1 else pygal.Line(title=f'{symbol} Stock Prices', x_label_rotation=20)
+    chart.x_labels = dates
+    chart.add('Open', open_prices)
+    chart.add('High', high_prices)
+    chart.add('Low', low_prices)
+    chart.add('Close', close_prices)
+    return chart.render_data_uri()
 
-    #connect and close connection
-    conn.commit()
-    conn.close()
-
-    #flash success message
-    flash('"{}" was successfully delted!'.format(post['title']))
-
-    #return to homepage
-    return redirect(url_for('index'))
-
-app.run(port=5000)
+#run app after flask run has been called
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
