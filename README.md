@@ -1,1 +1,1 @@
-This is a repository for the flask blog tutorial in the class INFO-4320.
+This is project 3a.# stock_visualizer_docker
